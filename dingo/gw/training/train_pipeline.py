@@ -23,6 +23,7 @@ from dingo.core.utils import (
 from dingo.core.utils.trainutils import EarlyStopping
 
 
+
 def prepare_training_new(train_settings: dict, train_dir: str, local_settings: dict):
     """
     Based on a settings dictionary, initialize a WaveformDataset and PosteriorModel.
@@ -76,6 +77,7 @@ def prepare_training_new(train_settings: dict, train_dir: str, local_settings: d
         train_settings["data"],
         train_settings["training"]["stage_0"]["asd_dataset_path"],
     )
+
 
     # This modifies the model settings in-place.
     autocomplete_model_kwargs(train_settings["model"], wfd[0])
@@ -184,6 +186,29 @@ def initialize_stage(pm, wfd, stage, num_workers, resume=False):
         stage["batch_size"],
         num_workers,
     )
+    '''print(f"Dataset length: {len(wfd)}")
+    print(f"Batch size: {stage['batch_size']}")
+    if hasattr(wfd, 'data_transform'):
+        print("Transforms in data_transform:")
+        try:
+            for t in wfd.data_transform.transforms:
+                print("  -", t)
+        except AttributeError:
+            print("  (data_transform non ha attributo 'transforms')")
+    for i, batch in enumerate(train_loader):
+        print(f"Processed batch {i}")
+        _ = batch
+        if i % 100 == 0:
+            print(f"Processed batch {i}")
+
+    num_batches = len(train_loader)
+    print(f"Numero totale di batch: {num_batches}")
+    for channel, snrs in snr_transform.snr_storage.items():
+
+    save_snr_to_hdf5(
+        snr_transform,
+        "/work/aspadaro/dingo_lisa/examples/lisa/new_runs/final_runs/snr_test.hdf5"
+    )'''
 
     if not resume:
         # New optimizer and scheduler. If we are resuming, these should have been
@@ -256,6 +281,7 @@ def train_stages(pm, wfd, train_dir, local_settings):
             train_loader, test_loader = initialize_stage(
                 pm, wfd, stage, local_settings["num_workers"], resume=False
             )
+
         else:
             print(f"\nResuming training in stage {n}. Settings:")
             print(yaml.dump(stage, default_flow_style=False, sort_keys=False))

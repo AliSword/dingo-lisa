@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt 
+import h5py
 
 from bilby.gw.detector import InterferometerList
 from dingo.gw.lisa import LISAInterferometerList
@@ -189,6 +190,22 @@ class GWSignal(object):
         asd = self.asd
         if asd is not None:
             sample["asds"] = asd
+
+        result = self.projection_transforms(sample)
+        domain_dict = {
+                        "fmin": self.data_domain.f_min,
+                        "fmax": self.data_domain.f_max,
+                        "delta_f": self.data_domain.delta_f,
+                        "sampling_frequencies": self.data_domain
+                    }
+        np.savez_compressed("/work/aspadaro/dingo_lisa/examples/lisa/new_runs/data.npz",
+            LISA1=result["waveform"]["LISA1"],
+            LISA2=result["waveform"]["LISA2"],
+            asd_LISA1=result["asds"]["LISA1"],
+            asd_LISA2=result["asds"]["LISA2"],
+            parameters=np.array(result["parameters"], dtype=object),
+            domain=np.array(domain_dict, dtype=object)
+                           )
 
         return self.projection_transforms(sample)
 
@@ -407,7 +424,7 @@ class Injection(GWSignal):
         print('len asd', len(asd['LISA1']))
         #print('snr_partial:', snt_partial_tot)
 
-        
+        np.random.seed(42)
         data = {}
         freq = []
         for ifo, s in signal["waveform"].items():
@@ -448,6 +465,8 @@ class Injection(GWSignal):
         signal["snr_total"] = snr_total
 
         return signal
+
+    
 
     def random_injection(self):
         """

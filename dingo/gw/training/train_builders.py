@@ -24,6 +24,8 @@ from dingo.gw.transforms import (
     GNPECoalescenceTimes,
     SampleExtrinsicParameters,
     GetDetectorTimes,
+  #  ComputeSNR,
+  #  save_snr_to_hdf5
 )
 from dingo.gw.noise.asd_dataset import ASDDataset
 from dingo.gw.prior import default_inference_parameters
@@ -90,6 +92,7 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     )
     assert wfd.domain == asd_dataset.domain
 
+    
     # Add window factor to domain, so that we can compute the noise variance.
     # TODO: we want to set `domain = wfd.domain`. This does not work at the moment,
     #  because this requires updating the window factor of the wfd.domain (instead of
@@ -169,6 +172,8 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     transforms.append(ProjectOntoDetectors(ifo_list, domain, ref_time))
     transforms.append(SampleNoiseASD(asd_dataset))
     transforms.append(WhitenAndScaleStrain(domain.noise_std))
+    #snr_transform = ComputeSNR()
+    #transforms.append(snr_transform)
     # We typically add white detector noise. For debugging purposes, this can be turned
     # off with zero_noise option in data_settings.
     if not data_settings.get("zero_noise", False):
@@ -198,6 +203,8 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
         transforms = [t for t in transforms if type(t) not in omit_transforms]
 
     wfd.transform = torchvision.transforms.Compose(transforms)
+
+    #return wfd, snr_transform
 
 def build_svd_for_embedding_network(
     wfd: WaveformDataset,

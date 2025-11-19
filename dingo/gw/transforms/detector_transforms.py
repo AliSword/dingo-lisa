@@ -10,6 +10,8 @@ from bilby.gw.prior import CalibrationPriorDict
 from bilby.gw.detector import InterferometerList
 from dingo.gw.lisa import LISAInterferometerList
 from dingo.gw.lisa import LISALowFrequencyInterferometer
+from dingo.gw.gwutils import get_optimal_snr
+#import h5py
 
 CC = 299792458.0
 
@@ -444,3 +446,32 @@ class ApplyCalibrationUncertainty(object):
             )
 
         return sample
+
+'''class ComputeSNR:
+    def __init__(self):
+        self.snr_storage = {}
+
+    def __call__(self, sample, idx=None):
+        waveforms = sample["waveform"]
+        snr_dict = {}
+        for channel, strain in waveforms.items():
+            if channel not in self.snr_storage:
+                self.snr_storage[channel] = []
+
+        )
+            snr = np.sqrt(np.sum(np.abs(strain)**2))
+            snr_dict[channel] = snr
+
+            self.snr_storage[channel].append(snr)
+
+
+        sample["snr"] = snr_dict
+        return sample
+
+
+def save_snr_to_hdf5(snr_obj, hdf5_path):
+    import h5py
+    with h5py.File(hdf5_path, "w") as f:
+        grp = f.create_group("snr")
+        for channel, snrs in snr_obj.snr_storage.items():
+            grp.create_dataset(channel, data=np.array(snrs))'''

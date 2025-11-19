@@ -280,6 +280,10 @@ def create_nsf_model(
     # str(embedding_net_builder).split(' ')[1]
 
     distribution = distributions.StandardNormal((input_dim,))
+    #distribution = distributions.MixtureOfGaussians( num_components=32, 
+     #                                                shape=[input_dim], 
+      #                                               learnable=True  
+      #                                             )
     transform = create_transform(
         num_flow_steps, input_dim, context_dim, base_transform_kwargs
     )

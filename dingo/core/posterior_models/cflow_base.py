@@ -4,6 +4,7 @@ from abc import abstractmethod
 
 from torchdiffeq import odeint
 from glasflow.nflows.utils.torchutils import repeat_rows, split_leading_dim
+from glasflow.nflows import distributions
 
 from .base_model import BasePosteriorModel
 
@@ -55,6 +56,12 @@ class ContinuousFlowPosteriorModel(BasePosteriorModel):
         self.theta_dim = self.metadata["train_settings"]["model"]["posterior_kwargs"][
             "input_dim"
         ]
+        #num_components = 32 
+        #self.base_distribution = distributions.MixtureOfGaussians(
+        #    num_components=num_components,
+        #    shape=[self.theta_dim],
+         #   learnable=True
+        #)
 
     def sample_t(self, batch_size):
         t = (1 - self.eps) * torch.rand(batch_size, device=self.device)
@@ -63,6 +70,7 @@ class ContinuousFlowPosteriorModel(BasePosteriorModel):
     def sample_theta_0(self, batch_size):
         """Sample theta_0 from the gaussian prior."""
         return torch.randn(batch_size, self.theta_dim, device=self.device)
+        #return self.base_distribution.sample((batch_size,)).to(self.device)
 
     @abstractmethod
     def evaluate_vector_field(self, t, theta_t, *context_data):

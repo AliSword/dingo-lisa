@@ -51,7 +51,7 @@ source dingo-venv/bin/activate
 This creates and activates a [venv](https://docs.python.org/3/library/venv.html) for Dingo
 called `dingo-venv`. In this virtual environment, install Dingo:
 ```sh
-cd dingo-lisa
+cd dingo
 pip install -e ."[dev]"
 ```
 This command installs an editable version of Dingo, meaning that any changes to the Dingo

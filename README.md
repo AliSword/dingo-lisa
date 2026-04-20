@@ -41,7 +41,7 @@ conda install -c conda-forge dingo-gw
 If you would like to make changes to Dingo, or to contribute to its development, you
 should install Dingo from source. To do so, first clone this repository:
 ```sh
-git clone git@github.com:dingo-gw/dingo.git
+git clone git@github.com:AliSword/dingo-lisa.git
 ```
 Next create a virtual environment for Dingo, e.g.,
 ```sh

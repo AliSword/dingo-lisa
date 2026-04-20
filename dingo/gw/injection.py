@@ -26,6 +26,7 @@ from dingo.gw.waveform_generator.waveform_generator import (
     NewInterfaceWaveformGenerator,
 )
 
+import os
 
 class GWSignal(object):
     """
@@ -192,20 +193,15 @@ class GWSignal(object):
             sample["asds"] = asd
 
         result = self.projection_transforms(sample)
+
+
         domain_dict = {
                         "fmin": self.data_domain.f_min,
                         "fmax": self.data_domain.f_max,
                         "delta_f": self.data_domain.delta_f,
                         "sampling_frequencies": self.data_domain
-                    }
-        np.savez_compressed("/work/aspadaro/dingo_lisa/examples/lisa/new_runs/data.npz",
-            LISA1=result["waveform"]["LISA1"],
-            LISA2=result["waveform"]["LISA2"],
-            asd_LISA1=result["asds"]["LISA1"],
-            asd_LISA2=result["asds"]["LISA2"],
-            parameters=np.array(result["parameters"], dtype=object),
-            domain=np.array(domain_dict, dtype=object)
-                           )
+            }
+
 
         return self.projection_transforms(sample)
 
@@ -385,6 +381,40 @@ class Injection(GWSignal):
         """
         signal = self.signal(theta)
         print("theta:", theta)
+
+
+#        out_file = (
+#        "/work/aspadaro/dingo_lisa/examples/lisa/new_runs/"
+#        "final_runs/final_runs_for_real/data_snr_80.npz"
+#        )
+
+#        theta_intrinsic, theta_extrinsic = split_off_extrinsic_parameters(theta)
+#        theta_intrinsic = {k: float(v) for k, v in theta_intrinsic.items()}
+        
+
+#        domain_dict = {
+#            "fmin": self.data_domain.f_min,
+#            "fmax": self.data_domain.f_max,
+#            "delta_f": self.data_domain.delta_f,
+#            "sampling_frequencies": self.data_domain,
+#        }
+
+#        parameters = {
+#            "intrinsic": theta_intrinsic,
+#            "extrinsic": theta_extrinsic,
+#        }
+
+#        np.savez_compressed(
+#            out_file,
+#             LISA1=signal["waveform"]["LISA1"],
+#            LISA2=signal["waveform"]["LISA2"],
+#            asd_LISA1=signal["asds"]["LISA1"],
+#            asd_LISA2=signal["asds"]["LISA2"],
+#            parameters=np.array(parameters, dtype=object),
+#            domain=np.array(domain_dict, dtype=object),
+#       )
+
+    
         duration = get_signal_duration(theta["chirp_mass"], self.data_domain.f_min)
         print("f min:", self.data_domain.f_min)
         print("f max:", self.data_domain.f_max)

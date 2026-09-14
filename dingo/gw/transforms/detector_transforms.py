@@ -335,6 +335,26 @@ class SampleSNRTargetLuminosityDistance(object):
         # throughout for defining the SNR target (see class docstring).
         self.ref_asds = asd_dataset.sample_random_asds()
 
+    def _restrict_to_valid_band(self, arr):
+        """
+        Restrict the last axis of arr to the valid frequency band
+        [domain.min_idx : domain.max_idx + 1], handling both the full-length
+        (len(domain)) and pre-truncated (len(domain) - domain.min_idx)
+        storage conventions used elsewhere in dingo (see e.g.
+        Domain.get_sample_frequencies_astype).
+        """
+        n = arr.shape[-1]
+        n_full = len(self.domain)
+        if n == n_full:
+            return arr[..., self.domain.min_idx : self.domain.max_idx + 1]
+        elif n == n_full - self.domain.min_idx:
+            return arr[..., : self.domain.max_idx + 1 - self.domain.min_idx]
+        else:
+            raise ValueError(
+                f"Array with last dimension {n} is incompatible with domain "
+                f"of length {n_full} (min_idx={self.domain.min_idx})."
+            )
+
     def __call__(self, input_sample):
         sample = input_sample.copy()
         parameters = sample["parameters"]
@@ -362,13 +382,17 @@ class SampleSNRTargetLuminosityDistance(object):
             raise TypeError(f"Unsupported ifo_list type: {type(self.ifo_list)}")
 
         # SNR^2 of the reference waveform (at d_ref, no rescale) against the
-        # FIXED reference ASD, summed over detectors.
+        # FIXED reference ASD, summed over detectors. Restricted to the valid
+        # frequency band [domain.min_idx : domain.max_idx + 1]: outside this
+        # range the ASD (and possibly the signal) can take placeholder/extreme
+        # values (e.g. near f=0, below f_min) that otherwise cause spurious
+        # overflow/NaN in the division inside get_inner_product.
         snr_ref_squared = 0.0
         for ifo in self.ifo_list:
             fp = ifo.antenna_response(*response_vars, mode="plus")
             fc = ifo.antenna_response(*response_vars, mode="cross")
-            strain_ref = fp * hp + fc * hc
-            psd_f = self.ref_asds[ifo.name] ** 2
+            strain_ref = self._restrict_to_valid_band(fp * hp + fc * hc)
+            psd_f = self._restrict_to_valid_band(self.ref_asds[ifo.name] ** 2)
             snr_ref_squared += get_inner_product(
                 strain_ref, strain_ref, psd_f, self.domain.delta_f
             )
@@ -378,6 +402,16 @@ class SampleSNRTargetLuminosityDistance(object):
         target_snr = np.exp(np.random.uniform(self.log_snr_min, self.log_snr_max))
 
         d_new = d_ref * snr_ref / target_snr
+
+        if not np.isfinite(d_new) or d_new <= 0:
+            raise ValueError(
+                f"SampleSNRTargetLuminosityDistance produced a non-finite or "
+                f"non-positive d_new={d_new} (snr_ref={snr_ref}, "
+                f"target_snr={target_snr}, d_ref={d_ref}). This most likely "
+                f"means snr_ref itself is non-finite -- check the reference "
+                f"ASD for zero/extreme values within "
+                f"[domain.min_idx, domain.max_idx]."
+            )
 
         # Importance weight for this reparametrized distance draw. A
         # log-uniform proposal for target_snr induces, for D, a log-uniform

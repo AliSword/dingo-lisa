@@ -284,6 +284,17 @@ class SampleSNRTargetLuminosityDistance(object):
     already sampled) and BEFORE ProjectOntoDetectors (which applies the real
     rescale + projection using the luminosity_distance value written here).
 
+    The target SNR is drawn log-uniformly within a PER-SOURCE window that
+    is the intersection of the globally requested [snr_min, snr_max] with
+    the SNR range actually achievable while keeping D inside the physical
+    distance prior's support [d_phys_min, d_phys_max] (different sources --
+    different intrinsic parameters / sky / polarization -- reach different
+    SNR at any fixed distance, so a fixed global window would often force D
+    outside the physical prior for quieter or louder-than-typical sources).
+    This guarantees every sample lands inside the physical prior's support
+    (no example is ever discarded / gets zero importance weight), without
+    narrowing the global ambition of the reweighting.
+
     Also computes and stores, under
     sample["extrinsic_parameters"]["snr_reweight_log_weight"], the log of
     the importance weight
@@ -291,9 +302,11 @@ class SampleSNRTargetLuminosityDistance(object):
         log[ p_physical(D) / p_proposal(D) ]
 
     needed to correct for this deliberate mismatch when computing the loss
-    (a log-uniform proposal for the target SNR induces, for the resulting D,
-    p_proposal(D) = 1 / (D * log(snr_max / snr_min)) -- see project notes for
-    the derivation). This is picked up downstream by AttachImportanceWeight.
+    (the per-source truncated log-uniform proposal for the target SNR
+    induces, for the resulting D, p_proposal(D) = 1 / (D * log_range), where
+    log_range is the per-sample log-width of that source's SNR window --
+    see project notes for the derivation). This is picked up downstream by
+    AttachImportanceWeight.
 
     Parameters
     ----------
@@ -331,6 +344,15 @@ class SampleSNRTargetLuminosityDistance(object):
         self.log_snr_max = np.log(self.snr_max)
         self.log_snr_range = self.log_snr_max - self.log_snr_min
         self.physical_distance_prior_dict = physical_distance_prior_dict
+        dist_prior = physical_distance_prior_dict["luminosity_distance"]
+        self.d_phys_min = float(dist_prior.minimum)
+        self.d_phys_max = float(dist_prior.maximum)
+        if not (np.isfinite(self.d_phys_min) and np.isfinite(self.d_phys_max)):
+            raise ValueError(
+                "SampleSNRTargetLuminosityDistance requires a physical "
+                "luminosity_distance prior with finite minimum/maximum "
+                f"(got minimum={self.d_phys_min}, maximum={self.d_phys_max})."
+            )
         # Fix ONE reference ASD per detector, sampled once here, used
         # throughout for defining the SNR target (see class docstring).
         # Cast to float64: typical LISA ASD values (~1e-20) squared (~1e-40)
@@ -406,8 +428,38 @@ class SampleSNRTargetLuminosityDistance(object):
             )
         snr_ref = np.sqrt(snr_ref_squared)
 
-        # Draw target SNR, log-uniform in [snr_min, snr_max].
-        target_snr = np.exp(np.random.uniform(self.log_snr_min, self.log_snr_max))
+        # Achievable target-SNR window for THIS source, given the physical
+        # distance prior's support [d_phys_min, d_phys_max]. D =
+        # d_ref*snr_ref/target_snr is monotonically decreasing in
+        # target_snr, so the nearest allowed distance (d_phys_min) sets the
+        # highest achievable SNR for this source, and the farthest allowed
+        # distance (d_phys_max) sets the lowest. Sampling target_snr
+        # log-uniformly WITHIN this per-source window (instead of the fixed
+        # global [snr_min, snr_max]) guarantees d_new always lands inside
+        # the physical prior's support -- no example is ever discarded /
+        # gets zero weight, without narrowing the global ambition of the
+        # reweighting (see project notes for the derivation and rationale).
+        snr_achievable_max = d_ref * snr_ref / self.d_phys_min
+        snr_achievable_min = d_ref * snr_ref / self.d_phys_max
+
+        # Intersect with the globally desired [snr_min, snr_max] window.
+        lo = max(self.snr_min, snr_achievable_min)
+        hi = min(self.snr_max, snr_achievable_max)
+        if lo > hi:
+            # This source's achievable range doesn't overlap the globally
+            # desired window at all (e.g. too quiet to ever reach snr_min
+            # even at d_phys_min, or too loud to stay under snr_max even at
+            # d_phys_max). Fall back to its own full achievable range, so
+            # d_new still lands inside the physical prior support.
+            lo, hi = snr_achievable_min, snr_achievable_max
+
+        log_lo = np.log(lo)
+        log_hi = np.log(hi)
+        log_range = log_hi - log_lo
+
+        target_snr = float(
+            np.exp(np.random.uniform(log_lo, log_hi)) if log_range > 0 else lo
+        )
 
         d_new = d_ref * snr_ref / target_snr
 
@@ -421,11 +473,19 @@ class SampleSNRTargetLuminosityDistance(object):
                 f"[domain.min_idx, domain.max_idx]."
             )
 
-        # Importance weight for this reparametrized distance draw. A
-        # log-uniform proposal for target_snr induces, for D, a log-uniform
-        # proposal p_proposal(D) = 1 / (D * log_snr_range) (independent of
-        # snr_ref -- see class docstring / project notes for derivation).
-        log_p_proposal = -np.log(d_new) - np.log(self.log_snr_range)
+        # Importance weight for this reparametrized distance draw. The
+        # per-source truncated log-uniform proposal on target_snr induces,
+        # for D, a log-uniform proposal p_proposal(D) = 1 / (D * log_range)
+        # over D in [d_phys_min, d_phys_max] -- same closed form as the
+        # untruncated case, but with a per-sample window width log_range
+        # instead of a fixed global one (see project notes for derivation).
+        if log_range > 0:
+            log_p_proposal = -np.log(d_new) - np.log(log_range)
+        else:
+            # Degenerate window (achievable range collapsed to a point for
+            # this source): d_new is forced to a single value with no
+            # freedom, so there is no proposal density to divide out.
+            log_p_proposal = 0.0
         log_p_physical = self.physical_distance_prior_dict.ln_prob(
             {"luminosity_distance": d_new}
         )

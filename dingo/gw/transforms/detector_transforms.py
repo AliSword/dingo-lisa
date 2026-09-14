@@ -321,6 +321,9 @@ class SampleSNRTargetLuminosityDistance(object):
         snr_min,
         snr_max,
         physical_distance_prior_dict,
+        bin_edges=None,
+        bin_coverage=None,
+        calibration_mode=False,
     ):
         self.ifo_list = ifo_list
         self.domain = domain
@@ -331,6 +334,45 @@ class SampleSNRTargetLuminosityDistance(object):
         self.log_snr_max = np.log(self.snr_max)
         self.log_snr_range = self.log_snr_max - self.log_snr_min
         self.physical_distance_prior_dict = physical_distance_prior_dict
+        self.calibration_mode = bool(calibration_mode)
+
+        # "Smart" coverage-corrected bin sampling (see project notes): if a
+        # calibration table (bin_edges, bin_coverage) is supplied, target_snr
+        # is drawn by first picking one of a set of log-spaced SNR bins with
+        # probability proportional to 1/coverage(bin) -- among the bins this
+        # particular source can actually reach while keeping D inside the
+        # physical prior's support -- and then log-uniformly WITHIN that
+        # bin's (physically-clipped) range. This pushes sources capable of
+        # reaching a RARE bin there more often, compensating for the fact
+        # that most sources can only reach a "typical" central SNR range,
+        # so the realized SNR histogram comes out close to flat WITHOUT any
+        # sample ever landing outside the physical prior (no zero weights).
+        # Falls back to the plain fixed-window mechanism below when no
+        # calibration table is given (bin_edges is None).
+        self.smart_bins = bin_edges is not None
+        if self.smart_bins:
+            self.bin_edges = np.asarray(bin_edges, dtype=float)
+            self.bin_lo_edges = self.bin_edges[:-1]
+            self.bin_hi_edges = self.bin_edges[1:]
+            coverage = np.clip(np.asarray(bin_coverage, dtype=float), 1e-3, 1.0)
+            self.bin_inv_coverage = 1.0 / coverage
+
+        # The physical distance prior's finite support [d_phys_min,
+        # d_phys_max] is needed both by calibration mode (to record each
+        # source's achievable SNR window) and by smart-bin mode (to clip
+        # each candidate bin to what's physically reachable). Not needed
+        # by the plain fixed-window mechanism.
+        if self.smart_bins or self.calibration_mode:
+            dist_prior = physical_distance_prior_dict["luminosity_distance"]
+            self.d_phys_min = float(dist_prior.minimum)
+            self.d_phys_max = float(dist_prior.maximum)
+            if not (np.isfinite(self.d_phys_min) and np.isfinite(self.d_phys_max)):
+                raise ValueError(
+                    "SampleSNRTargetLuminosityDistance requires a physical "
+                    "luminosity_distance prior with finite minimum/maximum "
+                    f"(got minimum={self.d_phys_min}, maximum={self.d_phys_max})."
+                )
+
         # Fix ONE reference ASD per detector, sampled once here, used
         # throughout for defining the SNR target (see class docstring).
         # Cast to float64: typical LISA ASD values (~1e-20) squared (~1e-40)
@@ -406,7 +448,92 @@ class SampleSNRTargetLuminosityDistance(object):
             )
         snr_ref = np.sqrt(snr_ref_squared)
 
-        # Draw target SNR, log-uniform in [snr_min, snr_max].
+        if self.calibration_mode:
+            # Calibration pass only: record this source's achievable SNR
+            # window (the range of target_snr reachable while keeping D
+            # inside the physical prior's support) and stop -- do not touch
+            # luminosity_distance / weight (unused downstream in this mode).
+            snr_achievable_max = d_ref * snr_ref / self.d_phys_min
+            snr_achievable_min = d_ref * snr_ref / self.d_phys_max
+            extrinsic_parameters["calib_snr_achievable_min"] = float(snr_achievable_min)
+            extrinsic_parameters["calib_snr_achievable_max"] = float(snr_achievable_max)
+            sample["extrinsic_parameters"] = extrinsic_parameters
+            return sample
+
+        if self.smart_bins:
+            # Coverage-corrected bin sampling (see project notes / __init__
+            # docstring above). Restrict every candidate bin to what THIS
+            # source can reach while keeping D inside the physical prior's
+            # support, then pick among the reachable bins with probability
+            # proportional to 1/coverage(bin) -- pushing sources capable of
+            # reaching a rare bin there more often -- and finally draw
+            # target_snr log-uniformly within the chosen (clipped) bin.
+            snr_achievable_max = d_ref * snr_ref / self.d_phys_min
+            snr_achievable_min = d_ref * snr_ref / self.d_phys_max
+
+            overlap_lo = np.maximum(self.bin_lo_edges, snr_achievable_min)
+            overlap_hi = np.minimum(self.bin_hi_edges, snr_achievable_max)
+            available = overlap_hi > overlap_lo
+
+            if not np.any(available):
+                # This source's achievable window falls entirely outside the
+                # calibrated bin range (e.g. more extreme than anything seen
+                # during calibration). Fall back to its own full achievable
+                # window, uncorrected -- still guarantees D stays physical.
+                lo, hi = snr_achievable_min, snr_achievable_max
+                log_p_bin_choice = 0.0
+            else:
+                probs = self.bin_inv_coverage[available]
+                probs = probs / probs.sum()
+                available_idx = np.flatnonzero(available)
+                chosen = np.random.choice(available_idx, p=probs)
+                lo = overlap_lo[chosen]
+                hi = overlap_hi[chosen]
+                log_p_bin_choice = float(np.log(probs[available_idx == chosen][0]))
+
+            log_lo = np.log(lo)
+            log_hi = np.log(hi)
+            log_range = log_hi - log_lo
+            target_snr = float(
+                np.exp(np.random.uniform(log_lo, log_hi)) if log_range > 0 else lo
+            )
+
+            d_new = d_ref * snr_ref / target_snr
+
+            if not np.isfinite(d_new) or d_new <= 0:
+                raise ValueError(
+                    f"SampleSNRTargetLuminosityDistance produced a non-finite "
+                    f"or non-positive d_new={d_new} (snr_ref={snr_ref}, "
+                    f"target_snr={target_snr}, d_ref={d_ref})."
+                )
+
+            # Importance weight: the mixture proposal density on target_snr
+            # is P(chosen bin | source) / (target_snr * log_range) (density
+            # of a log-uniform draw within the chosen bin, weighted by the
+            # probability of choosing that bin); converting to D via the
+            # same Jacobian as the plain mechanism below gives the same
+            # closed form, with an extra + log(P(bin|source)) term.
+            if log_range > 0:
+                log_p_proposal = log_p_bin_choice - np.log(d_new) - np.log(log_range)
+            else:
+                log_p_proposal = log_p_bin_choice
+            log_p_physical = self.physical_distance_prior_dict.ln_prob(
+                {"luminosity_distance": d_new}
+            )
+            log_weight = log_p_physical - log_p_proposal
+
+            extrinsic_parameters["luminosity_distance"] = float(d_new)
+            extrinsic_parameters["snr_reweight_log_weight"] = float(log_weight)
+            extrinsic_parameters["snr_reweight_target_snr"] = float(target_snr)
+
+            sample["extrinsic_parameters"] = extrinsic_parameters
+            return sample
+
+        # Plain mechanism (no calibration table supplied): draw target SNR
+        # log-uniform in the fixed global [snr_min, snr_max], identically
+        # for every source. Gives an exactly flat realized SNR histogram,
+        # at the cost of some samples landing outside the physical prior's
+        # support for atypically quiet/loud sources (weight = 0 there).
         target_snr = np.exp(np.random.uniform(self.log_snr_min, self.log_snr_max))
 
         d_new = d_ref * snr_ref / target_snr

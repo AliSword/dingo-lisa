@@ -184,6 +184,28 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
         physical_distance_prior_dict = BBHExtrinsicPriorDict(
             {"luminosity_distance": extrinsic_prior_dict["luminosity_distance"]}
         )
+        # Optional calibration table for the "smart" coverage-corrected
+        # bin-sampling mode (see SampleSNRTargetLuminosityDistance /
+        # project notes). Produced by misc_scripts/calibrate_snr_bins.py.
+        # Falls back to the plain fixed-window mechanism if not set.
+        bin_edges = None
+        bin_coverage = None
+        calibration_table_path = snr_reweight_settings.get("calibration_table")
+        if calibration_table_path is not None:
+            import json
+
+            with open(calibration_table_path, "r") as calib_f:
+                calibration_table = json.load(calib_f)
+            bin_edges = calibration_table["bin_edges"]
+            bin_coverage = calibration_table["coverage"]
+            print(
+                f"SNR reweighting: using calibrated bin coverage table from "
+                f"{calibration_table_path} "
+                f"({calibration_table['n_bins']} bins, "
+                f"{calibration_table['num_calibration_samples']} calibration "
+                f"samples)."
+            )
+
         transforms.append(
             SampleSNRTargetLuminosityDistance(
                 ifo_list,
@@ -193,6 +215,8 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
                 snr_reweight_settings["snr_min"],
                 snr_reweight_settings["snr_max"],
                 physical_distance_prior_dict,
+                bin_edges=bin_edges,
+                bin_coverage=bin_coverage,
             )
         )
 

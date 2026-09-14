@@ -7,7 +7,11 @@ from threadpoolctl import threadpool_limits
 from torch.utils.data import DataLoader
 from bilby.gw.detector import InterferometerList
 from dingo.gw.lisa import LISAInterferometerList
-from dingo.gw.prior import default_extrinsic_dict_ligo, default_extrinsic_dict_lisa
+from dingo.gw.prior import (
+    default_extrinsic_dict_ligo,
+    default_extrinsic_dict_lisa,
+    BBHExtrinsicPriorDict,
+)
 
 from dingo.gw.SVD import SVDBasis
 
@@ -24,6 +28,8 @@ from dingo.gw.transforms import (
     GNPECoalescenceTimes,
     SampleExtrinsicParameters,
     GetDetectorTimes,
+    SampleSNRTargetLuminosityDistance,
+    AttachImportanceWeight,
   #  ComputeSNR,
   #  save_snr_to_hdf5
 )
@@ -169,6 +175,27 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
         data_settings["standardization"] = standardization_dict
         print('parameters', wfd.parameters)
 
+    # Optional SNR-conditioned reweighting of the training set (see project notes /
+    # Labrador paper Sec. IV.B). Disabled by default -- existing configs without a
+    # "snr_reweighting" block in data_settings are completely unaffected.
+    snr_reweight_settings = data_settings.get("snr_reweighting", {})
+    snr_reweighting_enabled = snr_reweight_settings.get("enabled", False)
+    if snr_reweighting_enabled:
+        physical_distance_prior_dict = BBHExtrinsicPriorDict(
+            {"luminosity_distance": extrinsic_prior_dict["luminosity_distance"]}
+        )
+        transforms.append(
+            SampleSNRTargetLuminosityDistance(
+                ifo_list,
+                domain,
+                ref_time,
+                asd_dataset,
+                snr_reweight_settings["snr_min"],
+                snr_reweight_settings["snr_max"],
+                physical_distance_prior_dict,
+            )
+        )
+
     transforms.append(ProjectOntoDetectors(ifo_list, domain, ref_time))
     transforms.append(SampleNoiseASD(asd_dataset))
     transforms.append(WhitenAndScaleStrain(domain.noise_std))
@@ -190,10 +217,15 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     transforms.append(
         RepackageStrainsAndASDS(data_settings["detectors"], first_index=domain.min_idx)
     )
+    if snr_reweighting_enabled:
+        transforms.append(AttachImportanceWeight())
+
     if data_settings["context_parameters"]:
         selected_keys = ["inference_parameters", "waveform", "context_parameters"]
     else:
         selected_keys = ["inference_parameters", "waveform"]
+    if snr_reweighting_enabled:
+        selected_keys = selected_keys + ["weight"]
 
     transforms.append(UnpackDict(selected_keys=selected_keys))
 
@@ -269,6 +301,11 @@ def build_svd_for_embedding_network(
             RepackageStrainsAndASDS,
             SelectStandardizeRepackageParameters,
             UnpackDict,
+            # Keep the SVD initialization on the intentional FIXED distance
+            # (set above to "100.0"), regardless of any SNR-conditioned
+            # distance reweighting enabled for actual training.
+            SampleSNRTargetLuminosityDistance,
+            AttachImportanceWeight,
         ],
     )
 

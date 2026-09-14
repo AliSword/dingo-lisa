@@ -228,6 +228,7 @@ def initialize_stage(pm, wfd, stage, num_workers, resume=False):
             set_requires_grad_flag(
                 pm.network, name_contains="layers_rb", requires_grad=True
             )
+
     n_grad = get_number_of_model_parameters(pm.network, (True,))
     n_nograd = get_number_of_model_parameters(pm.network, (False,))
     print(f"Fixed parameters: {n_nograd}\nLearnable parameters: {n_grad}\n")
@@ -298,6 +299,9 @@ def train_stages(pm, wfd, train_dir, local_settings):
             
 
         runtime_limits.max_epochs_total = end_epochs[n]
+        use_importance_weights = train_settings["data"].get(
+            "snr_reweighting", {}
+        ).get("enabled", False)
         pm.train(
             train_loader,
             test_loader,
@@ -307,6 +311,7 @@ def train_stages(pm, wfd, train_dir, local_settings):
             use_wandb=local_settings.get("wandb", False),
             test_only=local_settings.get("test_only", False),
             early_stopping=early_stopping,
+            use_importance_weights=use_importance_weights,
         )
         # if test_only, model should not be saved, and run is complete
         if local_settings.get("test_only", False):

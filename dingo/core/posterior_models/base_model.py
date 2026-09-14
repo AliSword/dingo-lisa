@@ -371,6 +371,7 @@ class BasePosteriorModel(ABC):
         use_wandb=False,
         test_only=False,
         early_stopping: Optional[EarlyStopping] = None,
+        use_importance_weights: bool = False,
     ):
         """
 
@@ -386,6 +387,13 @@ class BasePosteriorModel(ABC):
             if True, training is skipped
         early_stopping: EarlyStopping
             Optional EarlyStopping instance.
+        use_importance_weights: bool = False
+            If True, the last element yielded per batch by the DataLoader is treated
+            as a per-sample importance weight (see AttachImportanceWeight /
+            SampleSNRTargetLuminosityDistance in dingo.gw.transforms) and passed as
+            the `weight` kwarg to `self.loss`, instead of being treated as network
+            context. Default False reproduces the original (unweighted) behavior
+            exactly.
 
         Returns
         -------
@@ -393,7 +401,7 @@ class BasePosteriorModel(ABC):
         """
 
         if test_only:
-            test_loss = test_epoch(self, test_loader)
+            test_loss = test_epoch(self, test_loader, use_importance_weights)
             print(f"test loss: {test_loss:.3f}")
 
         else:
@@ -405,7 +413,7 @@ class BasePosteriorModel(ABC):
                 with threadpool_limits(limits=1, user_api="blas"):
                     print(f"\nStart training epoch {self.epoch} with lr {lr}")
                     time_start = time.time()
-                    train_loss = train_epoch(self, train_loader)
+                    train_loss = train_epoch(self, train_loader, use_importance_weights)
                     train_time = time.time() - time_start
 
                     print(
@@ -417,7 +425,7 @@ class BasePosteriorModel(ABC):
                     # Testing
                     print(f"Start testing epoch {self.epoch}")
                     time_start = time.time()
-                    test_loss = test_epoch(self, test_loader)
+                    test_loss = test_epoch(self, test_loader, use_importance_weights)
                     test_time = time.time() - time_start
 
                     print(
@@ -469,7 +477,7 @@ class BasePosteriorModel(ABC):
                 print(f"Finished training epoch {self.epoch}.\n")
 
 
-def train_epoch(pm, dataloader):
+def train_epoch(pm, dataloader, use_importance_weights=False):
     pm.network.train()
     loss_info = dingo.core.utils.trainutils.LossInfo(
         pm.epoch,
@@ -480,13 +488,18 @@ def train_epoch(pm, dataloader):
     )
 
     for batch_idx, data in enumerate(dataloader):
-        print(type(data), len(data))
         loss_info.update_timer()
         pm.optimizer.zero_grad()
         # data to device
         data = [d.to(pm.device, non_blocking=True) for d in data]
         # compute loss
-        loss = pm.loss(data[0], *data[1:])
+        if use_importance_weights:
+            # Last element is a per-sample importance weight (see
+            # AttachImportanceWeight), not network context.
+            *context, weight = data[1:]
+            loss = pm.loss(data[0], *context, weight=weight)
+        else:
+            loss = pm.loss(data[0], *data[1:])
         # backward pass and optimizer step
         loss.backward()
         pm.optimizer.step()
@@ -497,7 +510,7 @@ def train_epoch(pm, dataloader):
     return loss_info.get_avg()
 
 
-def test_epoch(pm, dataloader):
+def test_epoch(pm, dataloader, use_importance_weights=False):
     with torch.no_grad():
         pm.network.eval()
         loss_info = dingo.core.utils.trainutils.LossInfo(
@@ -513,7 +526,11 @@ def test_epoch(pm, dataloader):
             # data to device
             data = [d.to(pm.device, non_blocking=True) for d in data]
             # compute loss
-            loss = pm.loss(data[0], *data[1:])
+            if use_importance_weights:
+                *context, weight = data[1:]
+                loss = pm.loss(data[0], *context, weight=weight)
+            else:
+                loss = pm.loss(data[0], *data[1:])
             # update loss for history and logging
             loss_info.update(loss.item(), len(data[0]))
             loss_info.print_info(batch_idx)

@@ -10,7 +10,7 @@ from bilby.gw.prior import CalibrationPriorDict
 from bilby.gw.detector import InterferometerList
 from dingo.gw.lisa import LISAInterferometerList
 from dingo.gw.lisa import LISALowFrequencyInterferometer
-from dingo.gw.gwutils import get_optimal_snr
+from dingo.gw.gwutils import get_optimal_snr, get_inner_product
 #import h5py
 
 CC = 299792458.0
@@ -252,6 +252,153 @@ class ProjectOntoDetectors(object):
         sample["extrinsic_parameters"] = extrinsic_parameters
 
         return sample
+
+
+class SampleSNRTargetLuminosityDistance(object):
+    """
+    SNR-conditioned reweighting of the training set (see project notes /
+    Labrador paper Sec. IV.B for the derivation).
+
+    Overrides the luminosity_distance sampled by SampleExtrinsicParameters so
+    that the network *optimal* SNR of each example is drawn from a chosen
+    target distribution (log-uniform between snr_min and snr_max), instead of
+    whatever SNR distribution is induced by sampling distance directly from
+    a (possibly physically-motivated) prior.
+
+    This exploits the fact that, in ProjectOntoDetectors, the amplitude
+    rescaling for luminosity distance is an EXACT, frequency-independent
+    scalar factor (h *= d_ref / d_new) applied before antenna-pattern
+    projection. Since SNR^2 is quadratic in the strain, this means exactly:
+
+        SNR(D) = SNR_ref(theta_intrinsic, sky, psi) * (d_ref / D)
+
+    where SNR_ref is the optimal SNR of the reference waveform (as stored,
+    at distance d_ref) projected with this sample's sky location /
+    polarization, evaluated against a FIXED reference ASD sampled once at
+    construction time (NOT the per-sample ASD, which is (re-)sampled later
+    in the pipeline by SampleNoiseASD -- using a fixed reference ASD here
+    only affects how "SNR" is defined for the purpose of balancing the
+    training set, not the actual noise added during training).
+
+    Must be placed AFTER SampleExtrinsicParameters (needs sky/psi/time
+    already sampled) and BEFORE ProjectOntoDetectors (which applies the real
+    rescale + projection using the luminosity_distance value written here).
+
+    Also computes and stores, under
+    sample["extrinsic_parameters"]["snr_reweight_log_weight"], the log of
+    the importance weight
+
+        log[ p_physical(D) / p_proposal(D) ]
+
+    needed to correct for this deliberate mismatch when computing the loss
+    (a log-uniform proposal for the target SNR induces, for the resulting D,
+    p_proposal(D) = 1 / (D * log(snr_max / snr_min)) -- see project notes for
+    the derivation). This is picked up downstream by AttachImportanceWeight.
+
+    Parameters
+    ----------
+    ifo_list : InterferometerList or LISAInterferometerList
+    domain : Domain
+    ref_time : float
+    asd_dataset : ASDDataset
+        Used only to fix ONE reference ASD per detector (sampled once, here,
+        at construction time) for defining the SNR target.
+    snr_min, snr_max : float
+        Support of the target (log-uniform) SNR distribution.
+    physical_distance_prior_dict : bilby PriorDict-like object
+        Must expose ln_prob({"luminosity_distance": D}). This is the
+        distance prior the trained posterior should actually target (i.e.
+        whatever was previously used for luminosity_distance in
+        extrinsic_prior_dict).
+    """
+
+    def __init__(
+        self,
+        ifo_list,
+        domain,
+        ref_time,
+        asd_dataset,
+        snr_min,
+        snr_max,
+        physical_distance_prior_dict,
+    ):
+        self.ifo_list = ifo_list
+        self.domain = domain
+        self.ref_time = ref_time
+        self.snr_min = float(snr_min)
+        self.snr_max = float(snr_max)
+        self.log_snr_min = np.log(self.snr_min)
+        self.log_snr_max = np.log(self.snr_max)
+        self.log_snr_range = self.log_snr_max - self.log_snr_min
+        self.physical_distance_prior_dict = physical_distance_prior_dict
+        # Fix ONE reference ASD per detector, sampled once here, used
+        # throughout for defining the SNR target (see class docstring).
+        self.ref_asds = asd_dataset.sample_random_asds()
+
+    def __call__(self, input_sample):
+        sample = input_sample.copy()
+        parameters = sample["parameters"]
+        extrinsic_parameters = sample["extrinsic_parameters"].copy()
+
+        d_ref = parameters["luminosity_distance"]
+        hp = sample["waveform"]["h_plus"]
+        hc = sample["waveform"]["h_cross"]
+
+        if isinstance(self.ifo_list, InterferometerList):
+            ra = extrinsic_parameters["ra"]
+            dec = extrinsic_parameters["dec"]
+            psi = extrinsic_parameters["psi"]
+            response_vars = [ra, dec, self.ref_time, psi]
+        elif isinstance(self.ifo_list, LISAInterferometerList):
+            theta_s = extrinsic_parameters["theta_s"]
+            phi_s = extrinsic_parameters["phi_s"]
+            psi = extrinsic_parameters["psi"]
+            theta_jn = parameters["theta_jn"]
+            theta_l, phi_l = LISALowFrequencyInterferometer.GetEclipticAngularMomentum(
+                theta_jn, theta_s, phi_s, psi
+            )
+            response_vars = [theta_s, phi_s, theta_l, phi_l, self.ref_time]
+        else:
+            raise TypeError(f"Unsupported ifo_list type: {type(self.ifo_list)}")
+
+        # SNR^2 of the reference waveform (at d_ref, no rescale) against the
+        # FIXED reference ASD, summed over detectors.
+        snr_ref_squared = 0.0
+        for ifo in self.ifo_list:
+            fp = ifo.antenna_response(*response_vars, mode="plus")
+            fc = ifo.antenna_response(*response_vars, mode="cross")
+            strain_ref = fp * hp + fc * hc
+            psd_f = self.ref_asds[ifo.name] ** 2
+            snr_ref_squared += get_inner_product(
+                strain_ref, strain_ref, psd_f, self.domain.delta_f
+            )
+        snr_ref = np.sqrt(snr_ref_squared)
+
+        # Draw target SNR, log-uniform in [snr_min, snr_max].
+        target_snr = np.exp(np.random.uniform(self.log_snr_min, self.log_snr_max))
+
+        d_new = d_ref * snr_ref / target_snr
+
+        # Importance weight for this reparametrized distance draw. A
+        # log-uniform proposal for target_snr induces, for D, a log-uniform
+        # proposal p_proposal(D) = 1 / (D * log_snr_range) (independent of
+        # snr_ref -- see class docstring / project notes for derivation).
+        log_p_proposal = -np.log(d_new) - np.log(self.log_snr_range)
+        log_p_physical = self.physical_distance_prior_dict.ln_prob(
+            {"luminosity_distance": d_new}
+        )
+        log_weight = log_p_physical - log_p_proposal
+
+        extrinsic_parameters["luminosity_distance"] = float(d_new)
+        extrinsic_parameters["snr_reweight_log_weight"] = float(log_weight)
+        extrinsic_parameters["snr_reweight_target_snr"] = float(target_snr)
+
+        sample["extrinsic_parameters"] = extrinsic_parameters
+        return sample
+
+    @property
+    def reproduction_dict(self):
+        return {"snr_min": self.snr_min, "snr_max": self.snr_max}
 
 
 class TimeShiftStrain(object):

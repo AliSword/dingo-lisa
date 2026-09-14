@@ -59,7 +59,7 @@ class FlowMatchingPosteriorModel(ContinuousFlowPosteriorModel):
         t = t * torch.ones(len(theta_t), device=theta_t.device)
         return self.network(t, theta_t, *context_data)
 
-    def loss(self, theta, *context):
+    def loss(self, theta, *context, weight=None):
         """
         Calculates loss as the mean squared error between the predicted vector field and
         the vector field for transporting the parameter data to samples from the prior.
@@ -72,15 +72,16 @@ class FlowMatchingPosteriorModel(ContinuousFlowPosteriorModel):
         context: torch.Tensor
             Context information (typically observed data). Must have the same leading
             (batch) dimension as theta.
+        weight: torch.Tensor, optional
+            Per-sample importance weight, shape (B,). If given, computes a weighted
+            mean over the batch instead of a plain mean (see project notes, Labrador
+            paper Sec. IV.B).
 
         Returns
         -------
         loss: torch.Tensor
-            Mean loss across the batch (a scalar).
+            Mean (weighted, if `weight` given) loss across the batch (a scalar).
         """
-        # Shall we allow for multiple time evaluations for every data, context pair (to improve efficiency)?
-        mse = nn.MSELoss()
-
         t = self.sample_t(len(theta))
         theta_0 = self.sample_theta_0(len(theta))
         theta_1 = theta
@@ -88,8 +89,17 @@ class FlowMatchingPosteriorModel(ContinuousFlowPosteriorModel):
         true_vf = theta - (1 - self.sigma_min) * theta_0
 
         predicted_vf = self.network(t, theta_t, *context)
-        loss = mse(predicted_vf, true_vf)
-        return loss
+
+        if weight is None:
+            mse = nn.MSELoss()
+            return mse(predicted_vf, true_vf)
+
+        # Per-sample MSE (mean over all non-batch dims), then weighted mean over
+        # the batch -- mean(w_i * mse_i), consistent with the weighted NLL used
+        # for normalizing_flow.py.
+        per_sample_mse = (predicted_vf - true_vf) ** 2
+        per_sample_mse = per_sample_mse.reshape(per_sample_mse.shape[0], -1).mean(dim=1)
+        return (weight * per_sample_mse).mean()
 
 
 def ot_conditional_flow(x_0, x_1, t, sigma_min):

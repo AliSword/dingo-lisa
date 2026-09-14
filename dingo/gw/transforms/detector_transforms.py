@@ -333,7 +333,13 @@ class SampleSNRTargetLuminosityDistance(object):
         self.physical_distance_prior_dict = physical_distance_prior_dict
         # Fix ONE reference ASD per detector, sampled once here, used
         # throughout for defining the SNR target (see class docstring).
-        self.ref_asds = asd_dataset.sample_random_asds()
+        # Cast to float64: typical LISA ASD values (~1e-20) squared (~1e-40)
+        # underflow in float32 (min positive normal ~1.18e-38), which
+        # otherwise silently poisons the SNR computation below with NaN/inf.
+        self.ref_asds = {
+            k: v.astype(np.float64)
+            for k, v in asd_dataset.sample_random_asds().items()
+        }
 
     def _restrict_to_valid_band(self, arr):
         """
@@ -361,8 +367,10 @@ class SampleSNRTargetLuminosityDistance(object):
         extrinsic_parameters = sample["extrinsic_parameters"].copy()
 
         d_ref = parameters["luminosity_distance"]
-        hp = sample["waveform"]["h_plus"]
-        hc = sample["waveform"]["h_cross"]
+        # Cast to complex128: see note above on ref_asds re: float32 underflow
+        # (the squared magnitude of the strain enters get_inner_product too).
+        hp = sample["waveform"]["h_plus"].astype(np.complex128)
+        hc = sample["waveform"]["h_cross"].astype(np.complex128)
 
         if isinstance(self.ifo_list, InterferometerList):
             ra = extrinsic_parameters["ra"]

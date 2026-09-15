@@ -50,7 +50,7 @@ class RejectionRetryTransform(object):
     _dbg_max_tries_seen = 0
     _dbg_hit_max_count = 0
 
-    def __init__(self, wfd, early_transform, late_transform, max_tries=50):
+    def __init__(self, wfd, early_transform, late_transform, max_tries=100):
         self.wfd = wfd
         self.early_transform = early_transform
         self.late_transform = late_transform

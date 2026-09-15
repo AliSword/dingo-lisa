@@ -290,7 +290,21 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     if omit_transforms is not None:
         transforms = [t for t in transforms if type(t) not in omit_transforms]
 
-    if rejection_mode_active:
+    # Some callers (e.g. build_svd_for_embedding_network, which fixes
+    # luminosity_distance to a standard value to build the SVD on zero-noise
+    # waveforms) intentionally omit SampleSNRTargetLuminosityDistance via
+    # omit_transforms, regardless of whether rejection mode is configured
+    # for actual training. That is a legitimate bypass of the whole SNR
+    # reweighting mechanism for this particular call, not a
+    # misconfiguration -- so in that case we fall back to the plain
+    # Compose(transforms) below, same as the (pre-existing) smart-bins /
+    # AttachImportanceWeight mechanisms already do implicitly.
+    rejection_explicitly_omitted = (
+        omit_transforms is not None
+        and SampleSNRTargetLuminosityDistance in omit_transforms
+    )
+
+    if rejection_mode_active and not rejection_explicitly_omitted:
         # Dataset-level rejection sampling (see project notes / chat
         # 2026-09-15 / RejectionRetryTransform docstring): split the chain
         # right after SampleSNRTargetLuminosityDistance into a cheap "early"
@@ -308,8 +322,10 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
             raise ValueError(
                 "rejection_calibration_table is set, but "
                 "SampleSNRTargetLuminosityDistance is not in the transform "
-                "chain (was it removed by omit_transforms?) -- rejection "
-                "mode cannot be installed without it."
+                "chain, and it was not explicitly listed in omit_transforms "
+                "either -- this looks like a genuine misconfiguration, not "
+                "an intentional bypass. Rejection mode cannot be installed "
+                "without it."
             )
         early_transforms = transforms[:split_idx]
         late_transforms = transforms[split_idx:]

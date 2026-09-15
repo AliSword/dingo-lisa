@@ -74,7 +74,7 @@ class RejectionRetryTransform(object):
         cls._dbg_max_tries_seen = max(cls._dbg_max_tries_seen, tries)
         if tries >= self.max_tries:
             cls._dbg_hit_max_count += 1
-        if cls._dbg_n_calls % 500 == 0:
+        if cls._dbg_n_calls % 50 == 0:
             print(
                 f"[REJECTION RETRY DEBUG] n={cls._dbg_n_calls} "
                 f"avg_tries={cls._dbg_total_tries / cls._dbg_n_calls:.1f} "

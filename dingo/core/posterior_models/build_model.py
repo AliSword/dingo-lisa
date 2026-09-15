@@ -91,6 +91,22 @@ def autocomplete_model_kwargs(model_kwargs: dict, data_sample: list):
             model_kwargs["embedding_kwargs"]["output_dim"] + gnpe_proxy_dim
         )
     except IndexError:
+        # data_sample has only [parameters, GW data] -- no GNPE proxies.
+        model_kwargs["embedding_kwargs"]["added_context"] = False
+        model_kwargs["posterior_kwargs"]["context_dim"] = model_kwargs[
+            "embedding_kwargs"
+        ]["output_dim"]
+    except TypeError:
+        # data_sample[2] exists but has no len() -- this is not a GNPE proxy
+        # array, it's a plain scalar. This happens when SNR reweighting is
+        # enabled (see AttachImportanceWeight / set_train_transforms) and no
+        # GNPE context_parameters are configured: selected_keys becomes
+        # ["inference_parameters", "waveform", "weight"], so data_sample[2]
+        # is the per-sample importance weight (a float), not GNPE context.
+        # train_epoch/test_epoch (base_model.py) always treat the LAST
+        # element of data[1:] as the weight regardless of how many context
+        # elements precede it, so the correct behavior here is the same as
+        # the no-GNPE-proxies case above.
         model_kwargs["embedding_kwargs"]["added_context"] = False
         model_kwargs["posterior_kwargs"]["context_dim"] = model_kwargs[
             "embedding_kwargs"

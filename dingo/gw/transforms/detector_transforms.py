@@ -506,12 +506,16 @@ class SampleSNRTargetLuminosityDistance(object):
             # weight is attached -- see the correctness caveat above.
             max_tries = 200
             d_candidate = None
-            for _ in range(max_tries):
+            _dbg_outside = False
+            _dbg_tries = 0
+            for _try_idx in range(max_tries):
                 d_candidate = float(self.dist_prior.sample())
                 candidate_snr = d_ref * snr_ref / d_candidate
+                _dbg_tries = _try_idx + 1
                 if candidate_snr < self.snr_min or candidate_snr >= self.snr_max:
                     # Outside the calibrated range: keep this natural draw
                     # as-is -- these rare tails are never thinned.
+                    _dbg_outside = True
                     break
                 bin_idx = int(
                     np.clip(
@@ -524,6 +528,27 @@ class SampleSNRTargetLuminosityDistance(object):
                 if np.random.uniform() < self.bin_accept_prob[bin_idx]:
                     break
             d_new = d_candidate
+
+            # --- TEMPORARY DEBUG INSTRUMENTATION (remove once diagnosed) ---
+            cls = type(self)
+            if not hasattr(cls, "_dbg_stats"):
+                cls._dbg_stats = {"n": 0, "outside": 0, "tries_sum": 0, "snr_ref_sum": 0.0}
+            st = cls._dbg_stats
+            st["n"] += 1
+            st["outside"] += int(_dbg_outside)
+            st["tries_sum"] += _dbg_tries
+            st["snr_ref_sum"] += float(snr_ref)
+            if st["n"] % 500 == 0:
+                print(
+                    f"[REJECTION DEBUG] n={st['n']} "
+                    f"frac_outside_calibrated_range={st['outside']/st['n']:.4f} "
+                    f"avg_tries={st['tries_sum']/st['n']:.2f} "
+                    f"avg_snr_ref={st['snr_ref_sum']/st['n']:.2f} "
+                    f"this_sample: d_ref={d_ref:.4g} snr_ref={snr_ref:.4g} "
+                    f"d_new={d_new:.4g} final_candidate_snr={d_ref*snr_ref/d_new:.4g} "
+                    f"n_tries={_dbg_tries} outside={_dbg_outside}"
+                )
+            # --- END TEMPORARY DEBUG INSTRUMENTATION ---
 
             if not np.isfinite(d_new) or d_new <= 0:
                 raise ValueError(

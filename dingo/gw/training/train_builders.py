@@ -190,7 +190,17 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
         # Falls back to the plain fixed-window mechanism if not set.
         bin_edges = None
         bin_coverage = None
+        bin_accept_prob = None
         calibration_table_path = snr_reweight_settings.get("calibration_table")
+        rejection_calibration_table_path = snr_reweight_settings.get(
+            "rejection_calibration_table"
+        )
+        if calibration_table_path is not None and rejection_calibration_table_path is not None:
+            raise ValueError(
+                "Set either data.snr_reweighting.calibration_table (smart-bins "
+                "mode) or data.snr_reweighting.rejection_calibration_table "
+                "(rejection-sampling mode), not both."
+            )
         if calibration_table_path is not None:
             import json
 
@@ -205,6 +215,24 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
                 f"{calibration_table['num_calibration_samples']} calibration "
                 f"samples)."
             )
+        if rejection_calibration_table_path is not None:
+            import json
+
+            with open(rejection_calibration_table_path, "r") as calib_f:
+                rejection_calibration_table = json.load(calib_f)
+            bin_edges = rejection_calibration_table["bin_edges"]
+            bin_accept_prob = rejection_calibration_table["accept_prob"]
+            print(
+                f"SNR reweighting: using REJECTION SAMPLING mode, calibration "
+                f"table from {rejection_calibration_table_path} "
+                f"({rejection_calibration_table['n_bins']} bins, "
+                f"{rejection_calibration_table['num_calibration_samples']} "
+                f"calibration samples). No importance weight will be attached "
+                f"(weight=1 for every accepted sample) -- remember to apply "
+                f"the importance-sampling correction against the TRUE "
+                f"physical prior before trusting raw distance results from "
+                f"this model (see misc_scripts/calibrate_snr_rejection.py)."
+            )
 
         transforms.append(
             SampleSNRTargetLuminosityDistance(
@@ -217,6 +245,7 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
                 physical_distance_prior_dict,
                 bin_edges=bin_edges,
                 bin_coverage=bin_coverage,
+                bin_accept_prob=bin_accept_prob,
             )
         )
 

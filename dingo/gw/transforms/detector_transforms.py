@@ -323,6 +323,7 @@ class SampleSNRTargetLuminosityDistance(object):
         physical_distance_prior_dict,
         bin_edges=None,
         bin_coverage=None,
+        bin_accept_prob=None,
         calibration_mode=False,
     ):
         self.ifo_list = ifo_list
@@ -349,20 +350,55 @@ class SampleSNRTargetLuminosityDistance(object):
         # sample ever landing outside the physical prior (no zero weights).
         # Falls back to the plain fixed-window mechanism below when no
         # calibration table is given (bin_edges is None).
-        self.smart_bins = bin_edges is not None
-        if self.smart_bins:
+        self.smart_bins = bin_edges is not None and bin_coverage is not None
+
+        # REJECTION-SAMPLING mode (see misc_scripts/calibrate_snr_rejection.py
+        # and project notes / chat on 2026-09-15): if bin_accept_prob is
+        # supplied (calibrated on the NATURAL, unweighted SNR histogram under
+        # the true physical prior), luminosity_distance is instead drawn
+        # directly and repeatedly from physical_distance_prior_dict itself,
+        # accepting/rejecting each candidate based on the natural
+        # population's bin occupancy (accept(bin) = min(1, p_min/p_hat(bin)),
+        # i.e. "undersample to match the rarest bin"). Every ACCEPTED sample
+        # keeps weight = 1 (no importance weight is attached at all -- see
+        # AttachImportanceWeight, which defaults to weight=1.0 when no
+        # snr_reweight_log_weight is present). This is deliberately simpler
+        # than smart_bins (no weight variance to manage during training),
+        # but it means the trained network targets a DELIBERATELY
+        # flattened, non-physical prior on distance: the existing
+        # importance-sampling correction (dingo/gw/importance_sampling)
+        # against the TRUE physical prior MUST be applied before trusting
+        # any raw distance result from a model trained this way.
+        self.rejection_mode = bin_edges is not None and bin_accept_prob is not None
+
+        if self.smart_bins and self.rejection_mode:
+            raise ValueError(
+                "Supply either bin_coverage (smart-bins mode) or "
+                "bin_accept_prob (rejection-sampling mode), not both."
+            )
+
+        if bin_edges is not None:
             self.bin_edges = np.asarray(bin_edges, dtype=float)
             self.bin_lo_edges = self.bin_edges[:-1]
             self.bin_hi_edges = self.bin_edges[1:]
+            self.n_bins = len(self.bin_lo_edges)
+
+        if self.smart_bins:
             coverage = np.clip(np.asarray(bin_coverage, dtype=float), 1e-3, 1.0)
             self.bin_inv_coverage = 1.0 / coverage
 
+        if self.rejection_mode:
+            self.bin_accept_prob = np.clip(
+                np.asarray(bin_accept_prob, dtype=float), 1e-3, 1.0
+            )
+
         # The physical distance prior's finite support [d_phys_min,
-        # d_phys_max] is needed both by calibration mode (to record each
-        # source's achievable SNR window) and by smart-bin mode (to clip
-        # each candidate bin to what's physically reachable). Not needed
-        # by the plain fixed-window mechanism.
-        if self.smart_bins or self.calibration_mode:
+        # d_phys_max] is needed by calibration mode (to record each source's
+        # achievable SNR window), by smart-bin mode (to clip each candidate
+        # bin to what's physically reachable), and by rejection mode (to
+        # draw fresh candidate distances directly from this prior). Not
+        # needed by the plain fixed-window mechanism.
+        if self.smart_bins or self.calibration_mode or self.rejection_mode:
             dist_prior = physical_distance_prior_dict["luminosity_distance"]
             self.d_phys_min = float(dist_prior.minimum)
             self.d_phys_max = float(dist_prior.maximum)
@@ -372,6 +408,8 @@ class SampleSNRTargetLuminosityDistance(object):
                     "luminosity_distance prior with finite minimum/maximum "
                     f"(got minimum={self.d_phys_min}, maximum={self.d_phys_max})."
                 )
+            if self.rejection_mode:
+                self.dist_prior = dist_prior
 
         # Fix ONE reference ASD per detector, sampled once here, used
         # throughout for defining the SNR target (see class docstring).
@@ -457,6 +495,46 @@ class SampleSNRTargetLuminosityDistance(object):
             snr_achievable_min = d_ref * snr_ref / self.d_phys_max
             extrinsic_parameters["calib_snr_achievable_min"] = float(snr_achievable_min)
             extrinsic_parameters["calib_snr_achievable_max"] = float(snr_achievable_max)
+            sample["extrinsic_parameters"] = extrinsic_parameters
+            return sample
+
+        if self.rejection_mode:
+            # Draw distance directly, repeatedly, from the TRUE physical
+            # prior, accepting/rejecting each candidate based on the
+            # natural population's bin occupancy (see __init__ docstring
+            # and misc_scripts/calibrate_snr_rejection.py). No importance
+            # weight is attached -- see the correctness caveat above.
+            max_tries = 200
+            d_candidate = None
+            for _ in range(max_tries):
+                d_candidate = float(self.dist_prior.sample())
+                candidate_snr = d_ref * snr_ref / d_candidate
+                if candidate_snr < self.snr_min or candidate_snr >= self.snr_max:
+                    # Outside the calibrated range: keep this natural draw
+                    # as-is -- these rare tails are never thinned.
+                    break
+                bin_idx = int(
+                    np.clip(
+                        np.searchsorted(self.bin_edges, candidate_snr, side="right")
+                        - 1,
+                        0,
+                        self.n_bins - 1,
+                    )
+                )
+                if np.random.uniform() < self.bin_accept_prob[bin_idx]:
+                    break
+            d_new = d_candidate
+
+            if not np.isfinite(d_new) or d_new <= 0:
+                raise ValueError(
+                    f"SampleSNRTargetLuminosityDistance (rejection mode) "
+                    f"produced a non-finite or non-positive d_new={d_new} "
+                    f"(snr_ref={snr_ref}, d_ref={d_ref})."
+                )
+
+            extrinsic_parameters["luminosity_distance"] = float(d_new)
+            # Deliberately NOT setting snr_reweight_log_weight: every
+            # accepted sample keeps weight = 1 (see AttachImportanceWeight).
             sample["extrinsic_parameters"] = extrinsic_parameters
             return sample
 

@@ -499,24 +499,38 @@ class SampleSNRTargetLuminosityDistance(object):
             return sample
 
         if self.rejection_mode:
-            # Draw distance directly, repeatedly, from the TRUE physical
-            # prior, accepting/rejecting each candidate based on the
-            # natural population's bin occupancy (see __init__ docstring
-            # and misc_scripts/calibrate_snr_rejection.py). No importance
-            # weight is attached -- see the correctness caveat above.
-            max_tries = 200
-            d_candidate = None
-            _dbg_outside = False
-            _dbg_tries = 0
-            for _try_idx in range(max_tries):
-                d_candidate = float(self.dist_prior.sample())
-                candidate_snr = d_ref * snr_ref / d_candidate
-                _dbg_tries = _try_idx + 1
-                if candidate_snr < self.snr_min or candidate_snr >= self.snr_max:
-                    # Outside the calibrated range: keep this natural draw
-                    # as-is -- these rare tails are never thinned.
-                    _dbg_outside = True
-                    break
+            # SINGLE-SHOT accept/reject decision (see project notes / chat
+            # 2026-09-15): draw ONE candidate distance from the TRUE
+            # physical prior and decide accept/reject based on the natural
+            # population's bin occupancy (misc_scripts/calibrate_snr_rejection.py).
+            #
+            # IMPORTANT: this does NOT retry with a new distance for the
+            # SAME source on rejection -- that was tried first and does not
+            # work, because a source whose entire achievable SNR window
+            # falls within one bin can never escape that bin no matter how
+            # many new distances are tried for it (see chat). Instead, on
+            # rejection this method just flags the sample via
+            # extrinsic_parameters["_snr_reject"] = True; the actual retry
+            # -- fetching a DIFFERENT random source from the dataset -- is
+            # handled one level up, by RejectionRetryTransform (which must
+            # be installed as wfd.transform for this mode; see
+            # train_builders.py). No importance weight is attached to
+            # accepted samples -- see the correctness caveat above.
+            d_candidate = float(self.dist_prior.sample())
+            candidate_snr = d_ref * snr_ref / d_candidate
+
+            if not np.isfinite(candidate_snr) or candidate_snr <= 0:
+                raise ValueError(
+                    f"SampleSNRTargetLuminosityDistance (rejection mode) "
+                    f"produced a non-finite or non-positive candidate_snr="
+                    f"{candidate_snr} (snr_ref={snr_ref}, d_ref={d_ref})."
+                )
+
+            if candidate_snr < self.snr_min or candidate_snr >= self.snr_max:
+                # Outside the calibrated range: always accept as-is (these
+                # rare tails are never thinned).
+                rejected = False
+            else:
                 bin_idx = int(
                     np.clip(
                         np.searchsorted(self.bin_edges, candidate_snr, side="right")
@@ -525,39 +539,10 @@ class SampleSNRTargetLuminosityDistance(object):
                         self.n_bins - 1,
                     )
                 )
-                if np.random.uniform() < self.bin_accept_prob[bin_idx]:
-                    break
-            d_new = d_candidate
+                rejected = not (np.random.uniform() < self.bin_accept_prob[bin_idx])
 
-            # --- TEMPORARY DEBUG INSTRUMENTATION (remove once diagnosed) ---
-            cls = type(self)
-            if not hasattr(cls, "_dbg_stats"):
-                cls._dbg_stats = {"n": 0, "outside": 0, "tries_sum": 0, "snr_ref_sum": 0.0}
-            st = cls._dbg_stats
-            st["n"] += 1
-            st["outside"] += int(_dbg_outside)
-            st["tries_sum"] += _dbg_tries
-            st["snr_ref_sum"] += float(snr_ref)
-            if st["n"] % 500 == 0:
-                print(
-                    f"[REJECTION DEBUG] n={st['n']} "
-                    f"frac_outside_calibrated_range={st['outside']/st['n']:.4f} "
-                    f"avg_tries={st['tries_sum']/st['n']:.2f} "
-                    f"avg_snr_ref={st['snr_ref_sum']/st['n']:.2f} "
-                    f"this_sample: d_ref={d_ref:.4g} snr_ref={snr_ref:.4g} "
-                    f"d_new={d_new:.4g} final_candidate_snr={d_ref*snr_ref/d_new:.4g} "
-                    f"n_tries={_dbg_tries} outside={_dbg_outside}"
-                )
-            # --- END TEMPORARY DEBUG INSTRUMENTATION ---
-
-            if not np.isfinite(d_new) or d_new <= 0:
-                raise ValueError(
-                    f"SampleSNRTargetLuminosityDistance (rejection mode) "
-                    f"produced a non-finite or non-positive d_new={d_new} "
-                    f"(snr_ref={snr_ref}, d_ref={d_ref})."
-                )
-
-            extrinsic_parameters["luminosity_distance"] = float(d_new)
+            extrinsic_parameters["luminosity_distance"] = float(d_candidate)
+            extrinsic_parameters["_snr_reject"] = rejected
             # Deliberately NOT setting snr_reweight_log_weight: every
             # accepted sample keeps weight = 1 (see AttachImportanceWeight).
             sample["extrinsic_parameters"] = extrinsic_parameters

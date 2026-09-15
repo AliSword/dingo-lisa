@@ -13,6 +13,53 @@ class UnpackDict(object):
         return [input_sample[k] for k in self.selected_keys]
 
 
+class RejectionRetryTransform(object):
+    """
+    Dataset-level rejection sampling for SNR reweighting (see project notes /
+    misc_scripts/calibrate_snr_rejection.py, and chat 2026-09-15).
+
+    Wraps a two-phase transform chain around a WaveformDataset:
+
+      - early_transform: everything up to and including
+        SampleSNRTargetLuminosityDistance (cheap -- needs the raw
+        polarizations and antenna response, but no noise/whitening). Marks
+        extrinsic_parameters["_snr_reject"] = True/False.
+      - late_transform: everything from ProjectOntoDetectors onward
+        (the expensive part: real detector projection, noise, whitening).
+
+    Must be installed directly as `wfd.transform` (not composed inside a
+    plain torchvision.transforms.Compose), because it needs a reference to
+    the dataset itself: when a candidate is rejected, retrying with a NEW
+    distance for the SAME source cannot work (a source whose entire
+    achievable SNR range falls in one bin can never land in another bin, no
+    matter how many distances are tried for it). Instead, on rejection this
+    fetches a genuinely DIFFERENT random source from the dataset (via
+    wfd.get_raw, which bypasses wfd.transform to avoid infinite recursion)
+    and retries the cheap early_transform on that one, up to max_tries
+    times. Only once a candidate is accepted (or max_tries is exhausted, as
+    a safety fallback) does it run the expensive late_transform, once.
+    """
+
+    def __init__(self, wfd, early_transform, late_transform, max_tries=200):
+        self.wfd = wfd
+        self.early_transform = early_transform
+        self.late_transform = late_transform
+        self.max_tries = max_tries
+
+    def __call__(self, data):
+        candidate = self.early_transform(data)
+        tries = 1
+        while (
+            candidate["extrinsic_parameters"].get("_snr_reject", False)
+            and tries < self.max_tries
+        ):
+            new_idx = np.random.randint(len(self.wfd))
+            raw = self.wfd.get_raw(new_idx)
+            candidate = self.early_transform(raw)
+            tries += 1
+        return self.late_transform(candidate)
+
+
 class AttachImportanceWeight(object):
     """
     Reads a per-sample importance-sampling log-weight, if present (attached

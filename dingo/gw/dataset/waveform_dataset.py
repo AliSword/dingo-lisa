@@ -201,11 +201,18 @@ class WaveformDataset(DingoDataset, torch.utils.data.Dataset):
         """The number of waveform samples."""
         return len(self.parameters)
 
-    def __getitem__(self, idx) -> Dict[str, Dict[str, Union[float, np.ndarray]]]:
+    def get_raw(self, idx) -> Dict[str, Dict[str, Union[float, np.ndarray]]]:
         """
-        Return a nested dictionary containing parameters and waveform polarizations
-        for sample with index `idx`. If defined, a chain of transformations is applied to
-        the waveform data.
+        Return the raw (untransformed) parameters + waveform polarizations for
+        sample with index `idx` -- i.e. what __getitem__ would build BEFORE
+        applying self.transform. Decompression is still applied (it is
+        considered part of "raw" data access, not of the main transform
+        chain).
+
+        Used by RejectionRetryTransform (SNR-reweighting rejection mode, see
+        project notes / misc_scripts/calibrate_snr_rejection.py) to fetch a
+        fresh candidate source directly, without going through self.transform
+        (which would otherwise recurse back into the rejection logic).
         """
         parameters = self.parameters.iloc[idx].to_dict()
         polarizations = {
@@ -217,8 +224,15 @@ class WaveformDataset(DingoDataset, torch.utils.data.Dataset):
         if self.decompression_transform is not None:
             polarizations = self.decompression_transform(polarizations)
 
-        # Main transforms can depend also on parameters.
-        data = {"parameters": parameters, "waveform": polarizations}
+        return {"parameters": parameters, "waveform": polarizations}
+
+    def __getitem__(self, idx) -> Dict[str, Dict[str, Union[float, np.ndarray]]]:
+        """
+        Return a nested dictionary containing parameters and waveform polarizations
+        for sample with index `idx`. If defined, a chain of transformations is applied to
+        the waveform data.
+        """
+        data = self.get_raw(idx)
         if self.transform is not None:
             data = self.transform(data)
         return data

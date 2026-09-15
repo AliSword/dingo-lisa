@@ -30,6 +30,7 @@ from dingo.gw.transforms import (
     GetDetectorTimes,
     SampleSNRTargetLuminosityDistance,
     AttachImportanceWeight,
+    RejectionRetryTransform,
   #  ComputeSNR,
   #  save_snr_to_hdf5
 )
@@ -180,6 +181,7 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     # "snr_reweighting" block in data_settings are completely unaffected.
     snr_reweight_settings = data_settings.get("snr_reweighting", {})
     snr_reweighting_enabled = snr_reweight_settings.get("enabled", False)
+    rejection_mode_active = False
     if snr_reweighting_enabled:
         physical_distance_prior_dict = BBHExtrinsicPriorDict(
             {"luminosity_distance": extrinsic_prior_dict["luminosity_distance"]}
@@ -218,6 +220,7 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
         if rejection_calibration_table_path is not None:
             import json
 
+            rejection_mode_active = True
             with open(rejection_calibration_table_path, "r") as calib_f:
                 rejection_calibration_table = json.load(calib_f)
             bin_edges = rejection_calibration_table["bin_edges"]
@@ -287,7 +290,36 @@ def set_train_transforms(wfd, data_settings, asd_dataset_path, omit_transforms=N
     if omit_transforms is not None:
         transforms = [t for t in transforms if type(t) not in omit_transforms]
 
-    wfd.transform = torchvision.transforms.Compose(transforms)
+    if rejection_mode_active:
+        # Dataset-level rejection sampling (see project notes / chat
+        # 2026-09-15 / RejectionRetryTransform docstring): split the chain
+        # right after SampleSNRTargetLuminosityDistance into a cheap "early"
+        # part (used repeatedly to test candidate sources) and an expensive
+        # "late" part (projection/noise/whitening, run once on the accepted
+        # candidate), and install the wrapper directly as wfd.transform (it
+        # needs a reference to wfd to fetch alternative candidate sources).
+        try:
+            split_idx = next(
+                i
+                for i, t in enumerate(transforms)
+                if isinstance(t, SampleSNRTargetLuminosityDistance)
+            ) + 1
+        except StopIteration:
+            raise ValueError(
+                "rejection_calibration_table is set, but "
+                "SampleSNRTargetLuminosityDistance is not in the transform "
+                "chain (was it removed by omit_transforms?) -- rejection "
+                "mode cannot be installed without it."
+            )
+        early_transforms = transforms[:split_idx]
+        late_transforms = transforms[split_idx:]
+        wfd.transform = RejectionRetryTransform(
+            wfd,
+            torchvision.transforms.Compose(early_transforms),
+            torchvision.transforms.Compose(late_transforms),
+        )
+    else:
+        wfd.transform = torchvision.transforms.Compose(transforms)
 
     #return wfd, snr_transform
 
